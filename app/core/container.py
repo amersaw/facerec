@@ -6,7 +6,7 @@ from app.domain.interfaces.storage.vector_store import VectorStore
 from app.domain.interfaces.recognition.face_recognition import FaceRecognitionService
 
 # Import concrete implementations used for instantiation
-from app.infrastructure.vectordb import PineconeVectorStore
+from app.infrastructure.vectordb import create_vector_store
 from app.services.aws.s3 import S3Service
 from app.services.aws.sqs import SQSService
 from app.services.face_indexing import FaceIndexingService
@@ -45,8 +45,8 @@ class ServiceContainer:
 
     async def initialize(self) -> None:
         """Initialize all services in the correct order."""
-        # Instantiate concrete implementations
-        self.vector_store = PineconeVectorStore()
+        # Instantiate concrete implementations using factory
+        self.vector_store = create_vector_store()
         self.s3_service = S3Service()
         self.sqs_service = SQSService()
         await self.sqs_service.initialize()
@@ -83,6 +83,8 @@ class ServiceContainer:
         self.s3_service = None # Still nullify the reference
 
         # Cleanup infrastructure services
+        if self.vector_store and hasattr(self.vector_store, 'close'):
+            await self.vector_store.close()
         self.vector_store = None
 
 

@@ -1,6 +1,7 @@
 """
 Worker script for consuming and processing facial recognition indexing tasks using Ray.
 """
+
 import asyncio
 import gc
 import logging
@@ -15,10 +16,11 @@ import ray
 import requests
 
 from app.consumers.indexing_consumer.processing_tasks import process_face_image
-from app.consumers.indexing_consumer.vector_store_actor import PineconeVectorStoreActor
+from app.consumers.indexing_consumer.vector_store_actor import VectorStoreActor
 from app.core.config import settings
 from app.services.aws.s3 import S3Service
 from app.services.aws.s3 import StorageError
+from app.services.aws.sqs import SQSService
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -62,8 +64,7 @@ def check_spot_termination() -> bool:
         # AWS provides a specific endpoint for spot instances to check termination notices
         # This endpoint is only accessible from within the EC2 instance
         response = requests.get(
-            "http://169.254.169.254/latest/meta-data/spot/instance-action",
-            timeout=2
+            "http://169.254.169.254/latest/meta-data/spot/instance-action", timeout=2
         )
         # If we get a 200 response, termination is imminent
         return response.status_code == 200
@@ -93,7 +94,7 @@ def log_system_resources(context: str = "") -> Dict[str, Any]:
         "memory_available_mb": memory.available / (1024 * 1024),
         "process_memory_mb": process_memory.rss / (1024 * 1024),
         "process_cpu_percent": process.cpu_percent(interval=0.1),
-        "context": context
+        "context": context,
     }
 
     prefix = f"[{context}] " if context else ""
@@ -109,7 +110,9 @@ def log_system_resources(context: str = "") -> Dict[str, Any]:
     return metrics
 
 
-async def download_s3_image(s3_service: S3Service, bucket: str, key: str, local_path: str) -> bool:
+async def download_s3_image(
+    s3_service: S3Service, bucket: str, key: str, local_path: str
+) -> bool:
     """Download an image from S3.
 
     Args:
@@ -134,7 +137,11 @@ async def download_s3_image(s3_service: S3Service, bucket: str, key: str, local_
         return False
     except Exception as e:
         # Catch unexpected errors during download
-        logger.error(f"Unexpected error downloading s3://{bucket}/{key}", error=str(e), exc_info=True)
+        logger.error(
+            f"Unexpected error downloading s3://{bucket}/{key}",
+            error=str(e),
+            exc_info=True,
+        )
         return False
 
 
@@ -142,9 +149,8 @@ def configure_environment():
     """Configure environment variables for optimal ML performance."""
     # Set environment variables to ensure all CPUs are utilized by ML operations
     cpu_count = os.cpu_count()
-    os.environ['OMP_NUM_THREADS'] = str(cpu_count)
-    logger.info(
-        f"Set OMP_NUM_THREADS to {cpu_count} to maximize CPU utilization")
+    os.environ["OMP_NUM_THREADS"] = str(cpu_count)
+    logger.info(f"Set OMP_NUM_THREADS to {cpu_count} to maximize CPU utilization")
     return cpu_count
 
 
@@ -164,12 +170,11 @@ async def initialize_services(region: str):
 
     # Verify Ray is initialized before proceeding
     if not ray.is_initialized():
-        raise RuntimeError(
-            "Ray must be initialized before calling initialize_services")
+        raise RuntimeError("Ray must be initialized before calling initialize_services")
 
     # For vector store, use an actor to avoid serialization issues
     logger.info("Creating vector store actor")
-    vector_store_actor = PineconeVectorStoreActor.remote()
+    vector_store_actor = VectorStoreActor.remote()
 
     # Log resource usage after initialization
     log_system_resources("Service Initialization")
@@ -182,7 +187,7 @@ async def initialize_services(region: str):
 class MessageProcessor:
     """Handles SQS message processing and resource management."""
 
-    def __init__(self, sqs_service, region: str):
+    def __init__(self, sqs_service: SQSService, region: str):
         self.sqs_service = sqs_service
         self.region = region
         self.s3_service = None
@@ -199,7 +204,7 @@ class MessageProcessor:
         self.last_stats_time = self.start_time
         self.last_resource_check = self.start_time
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         """Initialize required services."""
         # S3Service uses internal context manager, no explicit init needed here
         self.s3_service = S3Service(region_name=self.region)
@@ -208,16 +213,17 @@ class MessageProcessor:
 
         if not ray.is_initialized():
             raise RuntimeError(
-                "Ray must be initialized before calling initialize_services")
+                "Ray must be initialized before calling initialize_services"
+            )
 
         logger.info("Creating vector store actor")
-        # Actor will initialize its own PineconeVectorStore internally
-        self.vector_store_actor = PineconeVectorStoreActor.remote() # Call without args
+        # Actor will initialize vector store internally based on configuration
+        self.vector_store_actor = VectorStoreActor.remote()
 
         log_system_resources("Service Initialization")
         logger.info("Services initialized and ready for processing")
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """Clean up resources."""
         try:
             log_system_resources("Shutdown")
@@ -229,7 +235,9 @@ class MessageProcessor:
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
 
-    async def process_single_message(self, message: Dict[str, Any]) -> Tuple[bool, str, str, Any, bool]:
+    async def process_single_message(
+        self, message: Dict[str, Any]
+    ) -> Tuple[bool, str, str, Any, bool]:
         """Process a single message using Ray tasks.
 
         Args:
@@ -239,22 +247,23 @@ class MessageProcessor:
             Tuple: (success, job_id, receipt_handle, face_ids or error message, has_faces)
         """
         # Extract message details
-        receipt_handle = message['receipt_handle']
-        body = message['body']
-        job_id = body.get('job_id', 'unknown')
+        receipt_handle = message["receipt_handle"]
+        body = message["body"]
+        job_id = body.get("job_id", "unknown")
 
         try:
             # Extract indexing parameters
-            collection_id = body.get('collection_id')
-            s3_bucket = body.get('s3_bucket')
-            image_key = body.get('image_key')
+            collection_id = body.get("collection_id")
+            s3_bucket = body.get("s3_bucket")
+            image_key = body.get("image_key")
             max_faces = settings.MAX_FACES_PER_IMAGE
 
             if not all([collection_id, s3_bucket, image_key]):
                 raise ValueError("Missing required parameters in message body")
 
             logger.info(
-                f"Processing job {job_id}: image {image_key} for collection {collection_id}")
+                f"Processing job {job_id}: image {image_key} for collection {collection_id}"
+            )
 
             # Download image from S3
             temp_dir = f"/tmp/facerec/{job_id}"
@@ -262,14 +271,17 @@ class MessageProcessor:
             local_image_path = f"{temp_dir}/{job_id}-{os.path.basename(image_key)}"
 
             # Pass bucket and image_key directly to the download function
-            success = await download_s3_image(self.s3_service, s3_bucket, image_key, local_image_path)
+            success = await download_s3_image(
+                self.s3_service, s3_bucket, image_key, local_image_path
+            )
             if not success:
                 raise RuntimeError(
-                    f"Failed to download image from S3: {s3_bucket}/{image_key}")
+                    f"Failed to download image from S3: {s3_bucket}/{image_key}"
+                )
 
             try:
                 # Process image
-                with open(local_image_path, 'rb') as img_file:
+                with open(local_image_path, "rb") as img_file:
                     image_bytes = img_file.read()
 
                     result = await asyncio.to_thread(
@@ -279,13 +291,13 @@ class MessageProcessor:
                                 collection_id,
                                 image_key,
                                 image_bytes,
-                                max_faces
+                                max_faces,
                             )
                         )
                     )
 
-                    face_count = result['face_count']
-                    processing_time = result['processing_time']
+                    face_count = result["face_count"]
+                    processing_time = result["processing_time"]
 
                     # Update stats
                     if face_count > 0:
@@ -319,8 +331,7 @@ class MessageProcessor:
                     logger.warning(f"Failed to clean up temp files: {str(e)}")
         except Exception as e:
             error_details = traceback.format_exc()
-            logger.error(
-                f"Error processing job {job_id}: {str(e)}\n{error_details}")
+            logger.error(f"Error processing job {job_id}: {str(e)}\n{error_details}")
             return False, job_id, receipt_handle, str(e), False
 
     def log_stats(self):
@@ -328,8 +339,11 @@ class MessageProcessor:
         current_time = time.time()
         if current_time - self.last_stats_time > 30:  # Every 30 seconds
             elapsed = current_time - self.start_time
-            avg_time = self.total_processing_time / \
-                self.successful_processed if self.successful_processed > 0 else 0
+            avg_time = (
+                self.total_processing_time / self.successful_processed
+                if self.successful_processed > 0
+                else 0
+            )
 
             logger.info(
                 f"Stats: Processed {self.total_processed} messages, {self.successful_processed} successful "
@@ -340,14 +354,13 @@ class MessageProcessor:
                 f"{self.images_no_faces} images with no faces, {self.error_count} errors"
             )
 
-            log_system_resources(
-                f"Batch Stats (processed={self.total_processed})")
+            log_system_resources(f"Batch Stats (processed={self.total_processed})")
 
             self.last_stats_time = current_time
             self.last_resource_check = current_time
 
 
-async def process_messages(sqs_service, region: str) -> None:
+async def process_messages(sqs_service: SQSService, region: str) -> None:
     """Process messages from the SQS queue using Ray tasks for parallel processing.
 
     Args:
@@ -355,21 +368,21 @@ async def process_messages(sqs_service, region: str) -> None:
         region: AWS region
     """
     logger.info(
-        f"Starting message processing with Ray in {settings.ENVIRONMENT} environment")
+        f"Starting message processing with Ray in {settings.ENVIRONMENT} environment"
+    )
 
     # Initialize Ray if needed
     if not ray.is_initialized():
-        logger.warning(
-            "Ray was not initialized in main.py, initializing now...")
+        logger.warning("Ray was not initialized in main.py, initializing now...")
         ray.init(ignore_reinit_error=True)
         logger.info("Ray initialized in worker")
     else:
         logger.info("Using existing Ray instance")
 
     # Get Ray resources
-    cpu_count = ray.available_resources().get('CPU', 0)
+    cpu_count = ray.available_resources().get("CPU", 0)
     logger.info(f"Ray allocated {cpu_count} CPUs for processing")
-    os.environ['OMP_NUM_THREADS'] = str(max(1, int(cpu_count)))
+    os.environ["OMP_NUM_THREADS"] = str(max(1, int(cpu_count)))
 
     # Initialize processor
     processor = MessageProcessor(sqs_service, region)
@@ -379,7 +392,9 @@ async def process_messages(sqs_service, region: str) -> None:
         while True:
             try:
                 # Receive messages
-                messages = await sqs_service.receive_messages(max_messages=settings.SQS_BATCH_SIZE)
+                messages = await sqs_service.receive_messages(
+                    max_messages=settings.SQS_BATCH_SIZE
+                )
                 if not messages:
                     await asyncio.sleep(1)
                     continue
@@ -388,8 +403,7 @@ async def process_messages(sqs_service, region: str) -> None:
 
                 # Process messages concurrently
                 tasks = [
-                    asyncio.create_task(
-                        processor.process_single_message(message))
+                    asyncio.create_task(processor.process_single_message(message))
                     for message in messages
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -409,10 +423,13 @@ async def process_messages(sqs_service, region: str) -> None:
                         # Attempt to delete and check result
                         deleted = await sqs_service.delete_message(receipt_handle)
                         if not deleted:
-                            logger.warning(f"Failed to delete message for job {job_id} (receipt: {receipt_handle}). It might be processed again.")
+                            logger.warning(
+                                f"Failed to delete message for job {job_id} (receipt: {receipt_handle}). It might be processed again."
+                            )
                     else:
                         logger.error(
-                            f"Processing failed for job {job_id}: {face_count}")
+                            f"Processing failed for job {job_id}: {face_count}"
+                        )
                         processor.error_count += 1
 
                 # Log stats periodically

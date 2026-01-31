@@ -6,7 +6,7 @@ from fastapi import Depends
 
 from app.core.container import ServiceContainer, container
 from app.core.exceptions import ServiceNotInitializedError
-from app.infrastructure.vectordb import PineconeVectorStore
+from app.domain.interfaces.storage.vector_store import VectorStore
 from app.services import InsightFaceRecognitionService
 from app.services.aws.s3 import S3Service
 from app.services.face_indexing import FaceIndexingService
@@ -41,11 +41,11 @@ async def get_face_recognition_service() -> AsyncGenerator[InsightFaceRecognitio
     yield cont.face_recognition_service
 
 
-async def get_vector_store() -> AsyncGenerator[PineconeVectorStore, None]:
-    """Provide the initialized Pinecone vector store.
+async def get_vector_store() -> AsyncGenerator[VectorStore, None]:
+    """Provide the initialized vector store.
 
     Yields:
-        PineconeVectorStore: Initialized vector store instance
+        VectorStore: Initialized vector store instance (Pinecone or PGVector based on config)
 
     Raises:
         ServiceNotInitializedError: If vector store is not initialized
@@ -81,7 +81,7 @@ async def get_face_indexing_service(container: ServiceContainer = Depends(get_co
 async def get_face_matching_service(
     face_service: InsightFaceRecognitionService = Depends(
         get_face_recognition_service),
-    vector_store: PineconeVectorStore = Depends(get_vector_store),
+    vector_store: VectorStore = Depends(get_vector_store),
     storage: S3Service = Depends(get_s3_service),
 ) -> AsyncGenerator[FaceMatchingService, None]:
     """Provide the face matching service.

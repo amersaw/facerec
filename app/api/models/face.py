@@ -127,7 +127,7 @@ class FaceMatch(BaseModel):
                          description="Unique identifier for the matched face")
     similarity: float = Field(...,
                               description="Similarity score (0.0 to 1.0)",
-                              ge=MIN_THRESHOLD, le=MAX_THRESHOLD)
+                              ge=MIN_THRESHOLD, le=100)
     image_key: str = Field(...,
                          description="S3 object key (path) of the source image")
 

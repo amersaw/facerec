@@ -3,6 +3,7 @@
 
 # Exit on error
 set -e
+set -x
 
 # Check if environment file exists
 if [ ! -f .env.docker.api ]; then

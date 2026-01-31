@@ -59,7 +59,7 @@ def initialize_ray():
     return usable_cpus
 
 
-async def main():
+async def main()->int:
     """Main entry point for the SQS indexing consumer service using Ray."""
     # Print startup banner
     logger.info("=" * 50)

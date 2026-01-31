@@ -3,6 +3,8 @@ from typing import List, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.enums import VectorStoreType
+
 
 class Settings(BaseSettings):
     """Application settings.
@@ -52,9 +54,20 @@ class Settings(BaseSettings):
     WORKER_IDLE_TIMEOUT: int = 120  # Default to 2 minutes (120 seconds) based on SQS alarm config
     SQS_BATCH_SIZE: int = 10  # Maximum allowed by SQS ReceiveMessage API
     
+    # Vector Store Settings
+    VECTOR_STORE_TYPE: VectorStoreType = VectorStoreType.PINECONE
+    
+    # Vector Store Settings, either set Pinecone or PGVector settings based on the VECTOR_STORE_TYPE
     # Pinecone Settings
-    PINECONE_API_KEY: str
+    PINECONE_API_KEY: Optional[str] = None
     PINECONE_INDEX_NAME: str = "face-recognition"
+
+    # Postgres/PGVector Settings
+    POSTGRES_USER: Optional[str] = None
+    POSTGRES_PASSWORD: Optional[str] = None
+    POSTGRES_HOST: Optional[str] = None
+    POSTGRES_PORT: int = 5432
+    POSTGRES_DB: Optional[str] = None
     
     # AWS Settings
     AWS_ACCESS_KEY_ID: str = ""

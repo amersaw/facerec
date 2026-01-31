@@ -1,5 +1,6 @@
 """
-Ray actor for Pinecone vector store operations to avoid serialization issues.
+Ray actor for vector store operations to avoid serialization issues.
+Supports both Pinecone and PGVector backends based on configuration.
 """
 import ray
 import numpy as np
@@ -8,26 +9,30 @@ from typing import Dict, Any, Optional
 
 from app.domain.entities.face import Face
 from app.core.logging import get_logger
-from app.infrastructure.vectordb import PineconeVectorStore
+from app.core.config import settings
+from app.infrastructure.vectordb import create_vector_store
 
 logger = get_logger(__name__)
 
 @ray.remote
-class PineconeVectorStoreActor:
-    """Actor that wraps PineconeVectorStore, initializing it internally."""
+class VectorStoreActor:
+    """Actor that wraps VectorStore, initializing it internally based on configuration."""
     
     def __init__(self):
-        """Initialize PineconeVectorStore *inside the actor*."""
+        """Initialize VectorStore *inside the actor* using factory."""
         try:
-            self._vector_store = PineconeVectorStore()
-            logger.info(f"PineconeVectorStoreActor initialized its own PineconeVectorStore")
+            self._vector_store = create_vector_store()
+            logger.info(
+                "VectorStoreActor initialized vector store",
+                store_type=settings.VECTOR_STORE_TYPE.value
+            )
         except Exception as e:
-            logger.error(f"Failed to initialize PineconeVectorStore within actor: {e}", exc_info=True)
-            raise RuntimeError(f"Failed to initialize PineconeVectorStore within actor: {e}")
+            logger.error(f"Failed to initialize vector store within actor: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to initialize vector store within actor: {e}")
     
     async def store_face(self, face_dict: Dict[str, Any], collection_id: str, 
                          image_key: str, face_id: str, detection_id: str) -> bool:
-        """Store a face embedding in Pinecone.
+        """Store a face embedding in the vector store.
         
         Args:
             face_dict: Dictionary representation of a Face object
@@ -59,7 +64,7 @@ class PineconeVectorStoreActor:
                 face_detection_id=face_id,
                 detection_id=detection_id
             )
-            logger.debug(f"Successfully stored face {face_id} in Pinecone")
+            logger.debug(f"Successfully stored face {face_id} in vector store")
             return True
         except Exception as e:
             logger.error(
@@ -74,7 +79,7 @@ class PineconeVectorStoreActor:
     async def search_faces(self, query_face_dict: Dict[str, Any], 
                           collection_id: str, 
                           similarity_threshold: Optional[float] = None) -> Dict[str, Any]:
-        """Search for similar faces in Pinecone.
+        """Search for similar faces in the vector store.
         
         Args:
             query_face_dict: Dictionary representation of a Face object to query
